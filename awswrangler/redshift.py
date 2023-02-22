@@ -343,7 +343,7 @@ def _create_table(  # pylint: disable=too-many-locals,too-many-arguments,too-man
         if mode == "upsert":
             guid: str = uuid.uuid4().hex
             temp_table: str = f"temp_redshift_{guid}"
-            sql: str = f'CREATE TEMPORARY TABLE {temp_table} (LIKE "{schema}"."{table}")'
+            sql: str = f'CREATE TEMPORARY TABLE {temp_table} (LIKE "{schema}"."{table}" INCLUDING DEFAULTS)'
             _logger.debug(sql)
             cursor.execute(sql)
             return temp_table, None
