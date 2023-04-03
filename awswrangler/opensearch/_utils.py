@@ -12,6 +12,7 @@ from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
 
 from awswrangler import _utils, exceptions
+from awswrangler.annotations import Experimental
 
 _logger: logging.Logger = logging.getLogger(__name__)
 
@@ -242,6 +243,7 @@ def connect(
     return es
 
 
+@Experimental
 def create_collection(
     name: str,
     collection_type: str = "SEARCH",
@@ -330,7 +332,8 @@ def create_collection(
             status = response["collectionDetails"][0]["status"]  # type: ignore
 
         if status == "FAILED":
-            error_details: str = response.get("collectionErrorDetails")[0]  # type: ignore
+            errors = response["collectionErrorDetails"]  # type: ignore
+            error_details = errors[0] if len(errors) > 0 else "No error details provided"
             raise exceptions.QueryFailed(f"Failed to create collection `{name}`: {error_details}.")
 
         return response["collectionDetails"][0]  # type: ignore

@@ -252,6 +252,29 @@ def _overwrite_table_parameters(
     return parameters
 
 
+def _update_table_input(table_input: Dict[str, Any], columns_types: Dict[str, str], allow_reorder: bool = True) -> bool:
+    column_updated = False
+
+    catalog_cols: Dict[str, str] = {x["Name"]: x["Type"] for x in table_input["StorageDescriptor"]["Columns"]}
+
+    if not allow_reorder:
+        for catalog_key, frame_key in zip(catalog_cols, columns_types):
+            if catalog_key != frame_key:
+                raise exceptions.InvalidArgumentValue(f"Column {frame_key} is out of order.")
+
+    for c, t in columns_types.items():
+        if c not in catalog_cols:
+            _logger.debug("New column %s with type %s.", c, t)
+            table_input["StorageDescriptor"]["Columns"].append({"Name": c, "Type": t})
+            column_updated = True
+        elif t != catalog_cols[c]:  # Data type change detected!
+            raise exceptions.InvalidArgumentValue(
+                f"Data type change detected on column {c} (Old type: {catalog_cols[c]} / New type {t})."
+            )
+
+    return column_updated
+
+
 def _create_parquet_table(
     database: str,
     table: str,
@@ -282,19 +305,14 @@ def _create_parquet_table(
     table = sanitize_table_name(table=table)
     partitions_types = {} if partitions_types is None else partitions_types
     _logger.debug("catalog_table_input: %s", catalog_table_input)
+
     table_input: Dict[str, Any]
     if (catalog_table_input is not None) and (mode in ("append", "overwrite_partitions")):
         table_input = catalog_table_input
-        catalog_cols: Dict[str, str] = {x["Name"]: x["Type"] for x in table_input["StorageDescriptor"]["Columns"]}
-        for c, t in columns_types.items():
-            if c not in catalog_cols:
-                _logger.debug("New column %s with type %s.", c, t)
-                table_input["StorageDescriptor"]["Columns"].append({"Name": c, "Type": t})
-                mode = "update"
-            elif t != catalog_cols[c]:  # Data type change detected!
-                raise exceptions.InvalidArgumentValue(
-                    f"Data type change detected on column {c} (Old type: {catalog_cols[c]} / New type {t})."
-                )
+
+        is_table_updated = _update_table_input(table_input, columns_types)
+        if is_table_updated:
+            mode = "update"
     else:
         table_input = _parquet_table_definition(
             table=table,
@@ -368,11 +386,18 @@ def _create_csv_table(  # pylint: disable=too-many-arguments,too-many-locals
     table = sanitize_table_name(table=table)
     partitions_types = {} if partitions_types is None else partitions_types
     _logger.debug("catalog_table_input: %s", catalog_table_input)
-    table_input: Dict[str, Any]
+
     if schema_evolution is False:
         _utils.check_schema_changes(columns_types=columns_types, table_input=catalog_table_input, mode=mode)
+
+    table_input: Dict[str, Any]
     if (catalog_table_input is not None) and (mode in ("append", "overwrite_partitions")):
         table_input = catalog_table_input
+
+        is_table_updated = _update_table_input(table_input, columns_types, allow_reorder=False)
+        if is_table_updated:
+            mode = "update"
+
     else:
         table_input = _csv_table_definition(
             table=table,
@@ -415,7 +440,7 @@ def _create_csv_table(  # pylint: disable=too-many-arguments,too-many-locals
     )
 
 
-def _create_json_table(  # pylint: disable=too-many-arguments
+def _create_json_table(  # pylint: disable=too-many-arguments,too-many-locals
     database: str,
     table: str,
     path: str,
@@ -453,6 +478,11 @@ def _create_json_table(  # pylint: disable=too-many-arguments
         _utils.check_schema_changes(columns_types=columns_types, table_input=catalog_table_input, mode=mode)
     if (catalog_table_input is not None) and (mode in ("append", "overwrite_partitions")):
         table_input = catalog_table_input
+
+        is_table_updated = _update_table_input(table_input, columns_types)
+        if is_table_updated:
+            mode = "update"
+
     else:
         table_input = _json_table_definition(
             table=table,
@@ -627,6 +657,7 @@ def create_database(
     description: Optional[str] = None,
     catalog_id: Optional[str] = None,
     exist_ok: bool = False,
+    database_input_args: Optional[Dict[str, Any]] = None,
     boto3_session: Optional[boto3.Session] = None,
 ) -> None:
     """Create a database in AWS Glue Catalog.
@@ -643,6 +674,9 @@ def create_database(
     exist_ok : bool
         If set to True will not raise an Exception if a Database with the same already exists.
         In this case the description will be updated if it is different from the current one.
+    database_input_args : dict[str, Any], optional
+        Additional metadata to pass to database creation. Supported arguments listed here:
+        https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/glue.html#Glue.Client.create_database
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.
 
@@ -659,7 +693,7 @@ def create_database(
     ... )
     """
     client_glue: boto3.client = _utils.client(service_name="glue", session=boto3_session)
-    args: Dict[str, str] = {"Name": name}
+    args: Dict[str, Any] = {"Name": name, **database_input_args} if database_input_args else {"Name": name}
     if description is not None:
         args["Description"] = description
 
@@ -667,8 +701,10 @@ def create_database(
         r = client_glue.get_database(**_catalog_id(catalog_id=catalog_id, Name=name))
         if not exist_ok:
             raise exceptions.AlreadyExists(f"Database {name} already exists and <exist_ok> is set to False.")
-        if description and description != r["Database"].get("Description", ""):
-            client_glue.update_database(**_catalog_id(catalog_id=catalog_id, Name=name, DatabaseInput=args))
+        for k, v in args.items():
+            if v != r["Database"].get(k, ""):
+                client_glue.update_database(**_catalog_id(catalog_id=catalog_id, Name=name, DatabaseInput=args))
+                break
     except client_glue.exceptions.EntityNotFoundException:
         client_glue.create_database(**_catalog_id(catalog_id=catalog_id, DatabaseInput=args))
 
